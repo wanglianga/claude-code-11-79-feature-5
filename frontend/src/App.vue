@@ -23,7 +23,8 @@ const navGroups = [
     items: [
       { to: '/eligibility', label: 'Eligibility', title: 'Dual-domain eligibility' },
       { to: '/watermarks', label: 'Watermarks', title: 'Watermarks & transfer' },
-      { to: '/deliveries', label: 'Deliveries', title: 'Snapshots & deliveries' }
+      { to: '/deliveries', label: 'Deliveries', title: 'Snapshots & deliveries' },
+      { to: '/definition-comparison', label: 'Definition comparison', title: 'Definition-impact comparison versions' }
     ]
   },
   {

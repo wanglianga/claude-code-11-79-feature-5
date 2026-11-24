@@ -9,6 +9,7 @@ import ConsentProtocol from './views/ConsentProtocol.vue'
 import Eligibility from './views/Eligibility.vue'
 import Watermarks from './views/Watermarks.vue'
 import Deliveries from './views/Deliveries.vue'
+import DefinitionComparison from './views/DefinitionComparison.vue'
 import Revocation from './views/Revocation.vue'
 import Recovery from './views/Recovery.vue'
 import Audit from './views/Audit.vue'
@@ -23,6 +24,7 @@ const routes = [
   { path: '/eligibility', component: Eligibility, meta: { title: 'Dual-domain eligibility' } },
   { path: '/watermarks', component: Watermarks, meta: { title: 'Watermarks & transfer' } },
   { path: '/deliveries', component: Deliveries, meta: { title: 'Snapshots & deliveries' } },
+  { path: '/definition-comparison', component: DefinitionComparison, meta: { title: 'Definition-impact comparison' } },
   { path: '/revocation', component: Revocation, meta: { title: 'Withdrawal propagation' } },
   { path: '/recovery', component: Recovery, meta: { title: 'Recovery & quarantine' } },
   { path: '/audit', component: Audit, meta: { title: 'Audit trail' } }

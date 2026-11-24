@@ -16,7 +16,7 @@ Boot jar and served together with the REST API.
 ### Option A — Docker Compose (one command)
 
 ```bash
-cd /workspace/79
+cd /workspace/79-feature-5
 docker compose up --build
 # open http://localhost:8080   (Log in as admin / demo123)
 ```
@@ -94,6 +94,14 @@ gets **403** on `POST /api/consents`.
 | Stale snapshots never authorise a new read; old deliveries not pretended erased | `invalidateRuns`, `Delivery.accessRevoked` with summary/digests intact |
 | Retransmission after restore not double-counted | `EventIngestService` transport-identity dedupe + `TransportReceipt` |
 | Withdrawal/correction race adjudicated by approved rule, else quarantined | `EventIngestService` + `TieBreakRule` + `QuarantineItem` |
+| **Analysis definition registry** — two fixed rule sets with applicability intervals | `AnalysisDefinition` (`DEF-LEGACY-W12` exact week-12; `DEF-REVISED-W10-14` closest test in weeks 10–14, class-1 deviation = exclusion), rows `locked=true` |
+| **Dual-definition eligibility evaluator** — legacy/revised qualification, not-evaluable and no-egress reasons on the same frozen records, evaluated at each site locally | `DualDefinitionRules` (pure) + `DefinitionComparisonService.evaluateSite` → `DualDefinitionRow` |
+| **Local-domain endpoint bridge** — only approved aggregates cross the border | `LocalBridgeAggregate`: reclassification counts, window-selection differences, qualified/denominator uncertainty intervals, never subject rows |
+| **Denominator contribution ledger** — site × consent scope × risk stratum ranges | `DenominatorContribution` with overlap fraction, stability floor and standardisation weight |
+| **Independent comparison watermark** — separate counter plane that cannot move the frozen baseline | `ComparisonWatermark` (+ local-only `LocalEndpointWatermark`) |
+| **Comparison version publisher** — links to, never modifies, the frozen monthly report; blocks merged conclusions | `ComparisonVersion` (`PUBLISHED_BLOCKED`, `mergeBlocked`, block reasons), both `DUAL_BRIDGE` and `COHORT_BRIDGE` produce distinct versions |
+| **Difference attribution workbench** | append-only `DifferenceAnnotation`; the published version digest never changes |
+| Frozen monthly report permanently retained | `FrozenMonthlyReport` is immutable; publish code asserts digest/counts unchanged and refuses the operation otherwise |
 
 ### Reconstruction routes
 
@@ -127,34 +135,91 @@ summary and digests stay intact for audit — the delivery is not pretended to h
 
 ---
 
+## 4b. Definition-impact comparison (endpoint definition change)
+
+When the analysis plan changes from **legacy** (only the post-randomisation week-12 test; a class-1 deviation is
+a flag) to **revised** (the qualifying test closest to the target week within weeks 10–14; a class-1 deviation is
+an exclusion), the platform never overwrites the already-submitted monthly report. Instead it creates a new,
+separately watermarked **definition-impact comparison version**.
+
+* `FMR-2026-M05` — the monthly report previously submitted on the legacy frozen plane (8 qualified / denominator
+  12, per-stratum mix `LOW=4,MEDIUM=4,HIGH=4`). It is immutable: no code path updates or deletes it, and the
+  publisher refuses to finish if its digest changes during a publish.
+* The registry contains exactly two locked definitions with their applicability intervals; no third definition
+  can be registered in place of either.
+* Each site evaluates the same frozen records locally under both definitions (`DualDefinitionRow`): a
+  qualification per definition, full reason codes, a not-evaluable flag (e.g. adjudication arriving after the
+  legacy watermark) and an egress-block reason (no cross-border consent / withdrawal / above local watermark).
+* The **local bridge** emits aggregate-only artefacts — reclassification counts (retained / newly qualified /
+  lost / never qualified / indeterminate), window-selection differences and uncertainty intervals. China-site
+  subject rows are served only to the China analyst/admin; a global analyst requesting them gets **403**.
+* The **denominator contribution ledger** stores ranges per site × consent scope × risk stratum, with the
+  observed overlap fraction. Cells below the declared 0.60 floor are marked insufficient.
+* Two routes, two distinct versions (never a replacement):
+  * **DUAL_BRIDGE** — direct subject-rule correspondence on subjects with both observation opportunities;
+    insufficient overlap leaves wide intervals.
+  * **COHORT_BRIDGE** — a pre-declared common-observation-opportunity cohort standardised to the frozen
+    report's risk-stratum mix; subjects missing the common observation are excluded and a weight-stability
+    constraint blocks the conclusion when the exclusion ratio exceeds 0.40.
+* A version is published `PUBLISHED_BLOCKED` and **must not** be pooled into a combined efficacy/safety
+  conclusion while any block reason is present (insufficient overlap, band wider than 0.25 of the legacy
+  denominator, not-evaluable subjects, or unstable cohort weights).
+
+Seeded subjects (analysis day 100): **C** has qualifying W11 and W12 tests (dual opportunity; both definitions
+select W12); **E** has only a W11 test (newly qualified under the revised window); **F** has a W12 test plus a
+class-1 deviation (retained under legacy, excluded under revised); **D**'s W12 adjudication arrives on day 95,
+after the day-90 legacy freeze (legacy not-evaluable, revised qualified → indeterminate); **B**'s cross-border
+consent was withdrawn (local encoding retained, egress blocked); **A** holds China-only consent (qualifies
+locally, subject rows cannot leave the region).
+
+### Try it
+
+1. Sign in as **china**, open **Definition comparison** → evaluate each site (both routes).
+2. Sign in as **global** → select the three runs of one route → **Publish comparison**. Both versions come back
+   `PUBLISHED_BLOCKED` with their block reasons; open one to see the aggregate bridge, denominator ranges and the
+   read-only link to `FMR-2026-M05`.
+3. Re-open **Frozen monthly report**: digest and figures are unchanged. Add an attribution annotation — the
+   version digest stays the same.
+
+REST surface (all under `/api/definition-comparison`): `GET /definitions`, `GET /frozen-reports`,
+`GET /watermarks`, `GET /endpoint-watermarks`, `POST /evaluate` (CN/admin), `GET /runs`,
+`GET /runs/{code}/rows` (403 for cross-border roles on China sites), `POST /publish` (global/admin/sponsor),
+`GET /versions`, `GET /versions/{code}`, `POST /annotations`.
+
+---
+
 ## 5. Verification (what was actually run here)
 
 All commands below were executed in this workspace against a live instance. Results are quoted verbatim.
 
-### 5.1 Backend integration tests — 15/15 pass
+### 5.1 Backend integration tests — 29/29 pass
 
 ```bash
 cd backend && mvn test
 ```
 ```
-Tests run: 15, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 29, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 Covers: A/B/C/D rules; intersection semantics; both reconstruction routes agreeing (read-only and persisted);
 stale-snapshot invalidation; transport dedupe; conflicting-duplicate quarantine; withdrawal/correction race
-quarantine; delivery projection has no identity fields and survives revocation as an intact summary.
+quarantine; delivery projection has no identity fields and survives revocation as an intact summary; plus 14
+definition-comparison tests (locked registry, dual encoding per subject, independent watermarks, aggregate-only
+bridge intervals, overlap/weight merge gates, two distinct route versions, frozen-baseline immutability,
+append-only annotations).
 
-### 5.2 Frontend render tests (live backend) — 7/7 pass
+### 5.2 Frontend render tests (live backend) — 8/8 pass
 
 ```bash
 cd frontend && npm run test        # vitest + happy-dom, mounts the real views against http://127.0.0.1:8080
 ```
 ```
 Test Files  1 passed (1)
-     Tests  7 passed (7)
+     Tests  8 passed (8)
 ```
 Asserts the Overview shows **15/15**, the Acceptance cards list A1/B1/C1/D2, the Eligibility pivot renders both
-planes and subject D as Pending, and the Consent / Deliveries / Watermarks views render without error.
+planes and subject D as Pending, the Consent / Deliveries / Watermarks views render without error, and the
+Definition comparison workbench renders the two locked definitions and the immutable frozen report.
 
 ### 5.3 End-to-end API acceptance (live jar)
 
@@ -170,6 +235,21 @@ planes and subject D as Pending, and the Consent / Deliveries / Watermarks views
 | exact re-send of `VST-D4-V1` seq 12 | `duplicate=true` — "Retransmission … acknowledged; counted once." event count stays 9 |
 | conflicting re-send (different payload) | `duplicate=true, quarantined=true` → `Q-0001-DUP` |
 | `GET /api/watermarks?day=16` | CN-02 source confirmed 12 / ack 9 / analysis 9 → D12 **UNCONFIRMED** |
+
+Definition-impact comparison (also exercised against the live jar with the seeded scenario):
+
+| Step | Result |
+|------|--------|
+| `GET /api/definition-comparison/definitions` | exactly two `locked` rows: `DEF-LEGACY-W12` (window 12–12) and `DEF-REVISED-W10-14` (window 10–14, closest, class-1 exclusion) |
+| `POST /evaluate` as **global** on a China site | **403**; local evaluation is a CN/admin operation |
+| `POST /evaluate` (china) × 3 sites × 2 routes | six runs, each with its **own** watermark code (`CWM-…`); CN-02 reports `notEvaluable=1` (D's late adjudication), CN-01 `egress=1` (A's local-only consent), SG-01 `egress=1` (B's withdrawal) |
+| `GET /runs/{cn01}/rows` as **global** | **403** `LOCAL_ROW_EGRESS_DENIED`; as **china** the rows return (C retained, E newly qualified, F lost, A egress-blocked) |
+| `POST /publish` (global) dual-bridge 3 runs | `CMP-DUAL-001`, `PUBLISHED_BLOCKED`; legacy echoed **8/12**; revised qualified point **4** ∈ **[4, 7]**, denominator **[5, 8]**, window diffs 1; block reasons include `INSUFFICIENT_OVERLAP:4 cell(s) below 0.6` and `NOT_EVALUABLE_SUBJECTS:1` |
+| CN-01 efficacy bridge aggregate | retained 2, newly 1, lost 1, window diff 1, qualified interval [3, 4], egress blocked 1 — counts only, no pseudonym in the version summary |
+| `POST /publish` cohort-bridge 3 runs | separate `CMP-COHORT-001`; `cohortExcludedCount=5`, block reason `COHORT_WEIGHT_UNSTABLE:excludedRatio=0.83 > 0.4` |
+| frozen report re-read after both publishes | same digest `e94460ad…`, 8/12, `immutable=true` — never rewritten, replaced or recomputed |
+| `POST /annotations` twice then re-read version | 2 annotations appended, version digest unchanged |
+| transfer watermark rows / existing deliveries | unchanged (18 watermark rows; the comparison uses a separate counter plane) |
 
 The pinned watermark string for day 16 is
 `CN-01:AE=15(src=15,ack=15); … CN-02:VISIT=12(src=12,ack=9)…` (the CN-02 analysis stays at 9).
@@ -193,6 +273,10 @@ Open `http://localhost:8080` and sign in (the login screen lists the demo accoun
 * **Withdrawal** — propagate a recorded withdrawal, register disposition and tie-break rules, see executions.
 * **Recovery** — recovery reports (expand for per-domain digests), simulate a post-restore re-send, resolve
   quarantined races.
+* **Definition comparison** — the locked two-definition registry and immutable monthly report; run local
+  dual-definition evaluations per site (China role), publish separate dual-bridge/cohort comparison versions
+  (global role), inspect aggregate-only bridges, denominator ranges and the merge-block banner, and append
+  attribution annotations without changing any frozen output.
 * **Audit** — the append-only audit trail of every regulator-relevant transition.
 
 ### Try the headline flow
@@ -219,6 +303,16 @@ Open `http://localhost:8080` and sign in (the login screen lists the demo accoun
   the legal-member summary and digests are frozen and kept. Nothing claims the delivery never existed.
 * **Isolate, don't guess.** A withdrawal/correction race with equal effective instants and no registered
   tie-break rule is quarantined; it never silently picks a side.
+* **A definition change is a new version, never an overwrite.** Both endpoint definitions live in a locked
+  registry; each comparison gets its own watermark counter plane and its own version per route. The publisher
+  re-reads the frozen monthly report and aborts if its digest moved, so "link but never rewrite" is enforced in
+  code rather than by convention.
+* **Intervals instead of invented point estimates.** Late adjudications, not-evaluable and egress-blocked
+  subjects become lower/upper bounds on the revised qualified count and denominator; an interval that is too
+  wide (or a cohort whose weights are unstable) blocks any merged efficacy/safety conclusion.
+* **Aggregates are the only cross-border object.** Subject-level dual-definition rows stay in the local plane;
+  the bridge carries counts and ranges, and the workbench returns 403 — with an audit entry — when a
+  cross-border role asks for a China site's local rows.
 
 ---
 
@@ -227,13 +321,17 @@ Open `http://localhost:8080` and sign in (the login screen lists the demo accoun
 ```
 backend/
   src/main/java/com/ctrial/
-    model/        JPA entities + Enums (the rule vocabulary)
+    model/        JPA entities + Enums (the rule vocabulary), including AnalysisDefinition,
+                  FrozenMonthlyReport, ComparisonWatermark, EndpointAssessment, ProtocolDeviationEntry,
+                  ComparisonRun, DualDefinitionRow, LocalBridgeAggregate, DenominatorContribution,
+                  ComparisonVersion, DifferenceAnnotation
     service/      EligibilityEngine (pure), EligibilityService, EligibilityRunService,
                   DeliveryService, RevocationService, RecoveryService, EventIngestService,
-                  StateService, AcceptanceService, AuditService
-    web/          ReadController, CommandController, SpaConfig
-    config/       SecurityConfig, DemoSeeder
-  src/test/java/com/ctrial/AcceptanceRulesTest.java
+                  StateService, AcceptanceService, AuditService,
+                  DualDefinitionRules (pure), DefinitionComparisonService
+    web/          ReadController, CommandController, DefinitionComparisonController, SpaConfig
+    config/       SecurityConfig, DemoSeeder, ComparisonScenarioSeeder
+  src/test/java/com/ctrial/AcceptanceRulesTest.java, DefinitionComparisonTest.java
 frontend/
   src/            App, views/*, components/*, lib/api.js, lib/store.js, ui.test.js
 Dockerfile, compose.yaml
